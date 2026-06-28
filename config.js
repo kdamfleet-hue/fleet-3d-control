@@ -20,4 +20,13 @@ window.FLEET_CONFIG = {
 
   // عتبات تلوين الخطر حسب السرعة (كم/س) — تُستخدم إن لم يوفّر المصدر حالة جاهزة
   speed: { warn: 90, danger: 120 },
+
+  // مسارات الحركة (3D Routes): خط أثر يتلاشى خلف كل مركبة
+  trail: { enabled: true, maxPoints: 80, sampleMs: 300 },
+
+  // المناطق الحرجة (3D Zones): الإحداثيات بالدرجات، نصف القطر بالمتر
+  zones: [
+    { name: "منطقة حرجة — الميناء", lat: 26.4450, lng: 50.1050, radius: 1300, severity: "danger" },
+    { name: "منطقة تحذير — الوسط",  lat: 26.4080, lng: 50.0700, radius: 1700, severity: "warn"   },
+  ],
 };
