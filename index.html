@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fleet 3D Control — بن زومة</title>
+  <style>
+    :root { --bg:#0b1020; --panel:rgba(15,23,42,.82); --line:#1e293b; --txt:#e2e8f0; --muted:#94a3b8; }
+    * { box-sizing:border-box; }
+    html,body { margin:0; height:100%; overflow:hidden; background:var(--bg);
+      font-family:"Segoe UI",Tahoma,system-ui,Arial,sans-serif; color:var(--txt); }
+    #app { position:fixed; inset:0; }
+    canvas { display:block; }
+    .panel { position:fixed; background:var(--panel); border:1px solid var(--line);
+      border-radius:14px; padding:14px 16px; backdrop-filter:blur(8px); box-shadow:0 8px 30px rgba(0,0,0,.45); }
+    #hud { top:16px; right:16px; min-width:230px; }
+    #hud h1 { margin:0 0 8px; font-size:16px; letter-spacing:.3px; }
+    #hud .row { display:flex; justify-content:space-between; gap:14px; font-size:13px; padding:3px 0; }
+    #hud .row b { color:#fff; font-variant-numeric:tabular-nums; }
+    .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-inline-start:6px; vertical-align:middle; }
+    .live { color:#34d399; } .mock { color:#fbbf24; }
+    #legend { bottom:16px; right:16px; font-size:12px; }
+    #legend .item { display:flex; align-items:center; gap:8px; padding:2px 0; color:var(--muted); }
+    #legend .sw { width:14px; height:14px; border-radius:4px; }
+    #hint { bottom:16px; left:16px; font-size:12px; color:var(--muted); max-width:280px; line-height:1.6; }
+    a { color:#60a5fa; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="hud" class="panel">
+    <h1>🚛 Fleet 3D Control</h1>
+    <div class="row"><span>المصدر</span><b id="src">—</b></div>
+    <div class="row"><span>المركبات</span><b id="count">0</b></div>
+    <div class="row"><span>آخر تحديث</span><b id="updated">—</b></div>
+    <div class="row"><span>الحالة</span><b id="state">جارٍ التحميل…</b></div>
+  </div>
+
+  <div id="legend" class="panel">
+    <div class="item"><span class="sw" style="background:#34d399"></span> طبيعي</div>
+    <div class="item"><span class="sw" style="background:#fbbf24"></span> تحذير (سرعة مرتفعة)</div>
+    <div class="item"><span class="sw" style="background:#ef4444"></span> خطر</div>
+  </div>
+
+  <div id="hint" class="panel">
+    اسحب للدوران • عجلة الفأرة للتقريب • زر يمين للتحريك.<br>
+    للبيانات الحيّة اضبط <code>apiUrl</code> في <code>config.js</code> على نفس نطاق تطبيق Flask.
+  </div>
+
+  <script src="config.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    const CFG = Object.assign({
+      apiUrl: '', pollIntervalMs: 3000, center: { lat: 26.4207, lng: 50.0888 },
+      worldScale: 0.02, useMockOnError: true, mockVehicleCount: 8,
+      speed: { warn: 90, danger: 120 }
+    }, window.FLEET_CONFIG || {});
+
+    const COLORS = { ok: 0x34d399, warn: 0xfbbf24, danger: 0xef4444 };
+
+    // ---------- المشهد ----------
+    const app = document.getElementById('app');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b1020);
+    scene.fog = new THREE.Fog(0x0b1020, 120, 480);
+
+    const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.1, 5000);
+    camera.position.set(0, 90, 150);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    app.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.maxPolarAngle = Math.PI * 0.49;
+    controls.target.set(0, 0, 0);
+
+    // إضاءة
+    scene.add(new THREE.HemisphereLight(0x9fb4ff, 0x0b1020, 0.7));
+    const sun = new THREE.DirectionalLight(0xffffff, 1.1);
+    sun.position.set(120, 200, 80);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = sun.shadow.camera.bottom = -400;
+    sun.shadow.camera.right = sun.shadow.camera.top = 400;
+    scene.add(sun);
+
+    // أرضية + شبكة
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(2000, 2000),
+      new THREE.MeshStandardMaterial({ color: 0x0f1830, roughness: 1, metalness: 0 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    const grid = new THREE.GridHelper(2000, 100, 0x1e3a8a, 0x16233f);
+    grid.position.y = 0.02;
+    scene.add(grid);
+
+    // ---------- بناء مركبة ثلاثية الأبعاد ----------
+    function makeVehicle(color) {
+      const g = new THREE.Group();
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(6, 2.4, 3),
+        new THREE.MeshStandardMaterial({ color, roughness: .5, metalness: .2 })
+      );
+      body.position.y = 1.7; body.castShadow = true; g.add(body);
+      const cab = new THREE.Mesh(
+        new THREE.BoxGeometry(2.4, 2.2, 2.7),
+        new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: .6 })
+      );
+      cab.position.set(2.2, 2.0, 0); cab.castShadow = true; g.add(cab);
+      const wheelGeo = new THREE.CylinderGeometry(0.9, 0.9, 0.7, 14);
+      const wheelMat = new THREE.MeshStandardMaterial({ color: 0x111827 });
+      [[-2,1.6],[2,1.6],[-2,-1.6],[2,-1.6]].forEach(([x,z]) => {
+        const w = new THREE.Mesh(wheelGeo, wheelMat);
+        w.rotation.x = Math.PI / 2; w.position.set(x, 0.9, z); g.add(w);
+      });
+      // هالة سفلية حسب الحالة
+      const halo = new THREE.Mesh(
+        new THREE.RingGeometry(4.2, 5.2, 28),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: .45, side: THREE.DoubleSide })
+      );
+      halo.rotation.x = -Math.PI / 2; halo.position.y = 0.05; g.add(halo);
+      g.userData.body = body; g.userData.halo = halo;
+      return g;
+    }
+
+    function makeLabel(text) {
+      const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = 'rgba(15,23,42,0.85)'; ctx.fillRect(0, 0, 256, 64);
+      ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 30px Tahoma'; ctx.textAlign = 'center';
+      ctx.fillText(text, 128, 42);
+      const tex = new THREE.CanvasTexture(c);
+      const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true }));
+      spr.scale.set(12, 3, 1); spr.position.y = 8;
+      return spr;
+    }
+
+    // ---------- إسقاط الإحداثيات إلى المستوى ----------
+    function project(lat, lng) {
+      const m = 111320; // متر لكل درجة تقريبًا
+      const x = (lng - CFG.center.lng) * Math.cos(CFG.center.lat * Math.PI / 180) * m * CFG.worldScale;
+      const z = -(lat - CFG.center.lat) * m * CFG.worldScale;
+      return { x, z };
+    }
+
+    function colorFor(v) {
+      const s = (v.status || '').toString().toLowerCase();
+      if (['danger','alarm','critical','accident','خطر','حادث'].some(k => s.includes(k))) return COLORS.danger;
+      if (['warn','warning','تحذير'].some(k => s.includes(k))) return COLORS.warn;
+      if (typeof v.speed === 'number') {
+        if (v.speed >= CFG.speed.danger) return COLORS.danger;
+        if (v.speed >= CFG.speed.warn) return COLORS.warn;
+      }
+      return COLORS.ok;
+    }
+
+    // ---------- إدارة المركبات في المشهد ----------
+    const fleet = new Map(); // id -> { group, target:{x,z}, heading }
+
+    function upsert(vehicles) {
+      const seen = new Set();
+      for (const v of vehicles) {
+        seen.add(v.id);
+        const p = project(v.lat, v.lng);
+        const col = colorFor(v);
+        let entry = fleet.get(v.id);
+        if (!entry) {
+          const group = makeVehicle(col);
+          group.position.set(p.x, 0, p.z);
+          group.add(makeLabel(v.name || v.id));
+          scene.add(group);
+          entry = { group, target: { x: p.x, z: p.z }, heading: 0 };
+          fleet.set(v.id, entry);
+        } else {
+          entry.target = { x: p.x, z: p.z };
+          const mat = entry.group.userData.body.material;
+          mat.color.setHex(col); entry.group.userData.halo.material.color.setHex(col);
+        }
+      }
+      // إزالة المركبات المفقودة
+      for (const [id, e] of fleet) {
+        if (!seen.has(id)) { scene.remove(e.group); fleet.delete(id); }
+      }
+      document.getElementById('count').textContent = fleet.size;
+    }
+
+    // ---------- تطبيع أي شكل بيانات وارد ----------
+    function num(x){ const n = parseFloat(x); return Number.isFinite(n) ? n : null; }
+    function pick(o, keys){ for (const k of keys) if (o && o[k] != null) return o[k]; return undefined; }
+
+    function normalize(raw) {
+      let arr = [];
+      if (Array.isArray(raw)) arr = raw;
+      else if (raw && Array.isArray(raw.features)) // GeoJSON
+        return raw.features.map((f, i) => {
+          const c = f.geometry && f.geometry.coordinates || [];
+          return { id: String(pick(f.properties||{}, ['id','name']) ?? i),
+                   name: pick(f.properties||{}, ['name','title','plate']) ,
+                   lat: num(c[1]), lng: num(c[0]),
+                   status: pick(f.properties||{}, ['status','state']),
+                   speed: num(pick(f.properties||{}, ['speed','spd'])) };
+        }).filter(v => v.lat != null && v.lng != null);
+      else if (raw && typeof raw === 'object') {
+        const k = Object.keys(raw).find(k => Array.isArray(raw[k]));
+        arr = k ? raw[k] : [];
+      }
+      return arr.map((o, i) => ({
+        id: String(pick(o, ['id','assetId','deviceId','imei','plate','vehicleId']) ?? i),
+        name: pick(o, ['name','plate','label','title','assetName','deviceName']),
+        lat: num(pick(o, ['lat','latitude','Lat','Latitude','y'])),
+        lng: num(pick(o, ['lng','lon','long','longitude','Lng','Lon','Longitude','x'])),
+        status: pick(o, ['status','state','alarm','condition']),
+        speed: num(pick(o, ['speed','spd','velocity']))
+      })).filter(v => v.lat != null && v.lng != null);
+    }
+
+    // ---------- بيانات تجريبية متحركة ----------
+    const mock = Array.from({ length: CFG.mockVehicleCount }, (_, i) => ({
+      id: 'DMM-' + (100 + i),
+      name: 'مركبة ' + (i + 1),
+      lat: CFG.center.lat + (Math.random() - .5) * 0.06,
+      lng: CFG.center.lng + (Math.random() - .5) * 0.06,
+      speed: Math.round(Math.random() * 130),
+      vx: (Math.random() - .5) * 0.0006, vz: (Math.random() - .5) * 0.0006
+    }));
+    function stepMock() {
+      for (const m of mock) {
+        m.lat += m.vz; m.lng += m.vx;
+        if (Math.abs(m.lat - CFG.center.lat) > 0.05) m.vz *= -1;
+        if (Math.abs(m.lng - CFG.center.lng) > 0.05) m.vx *= -1;
+        if (Math.random() < 0.05) m.speed = Math.round(Math.random() * 130);
+      }
+      return mock.map(({ id, name, lat, lng, speed }) => ({ id, name, lat, lng, speed,
+        status: speed >= CFG.speed.danger ? 'danger' : speed >= CFG.speed.warn ? 'warn' : 'ok' }));
+    }
+
+    // ---------- حلقة جلب البيانات ----------
+    function setSource(live) {
+      const el = document.getElementById('src');
+      el.innerHTML = live ? 'مباشر<span class="dot live" style="background:#34d399"></span>'
+                          : 'تجريبي<span class="dot mock" style="background:#fbbf24"></span>';
+    }
+    function stamp(){ const d = new Date();
+      document.getElementById('updated').textContent =
+        String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0'); }
+
+    async function poll() {
+      let vehicles = null, live = false;
+      if (CFG.apiUrl) {
+        try {
+          const r = await fetch(CFG.apiUrl, { headers: { 'Accept': 'application/json' } });
+          if (r.ok) { const data = await r.json(); const n = normalize(data);
+            if (n.length) { vehicles = n; live = true; } }
+        } catch (_) { /* CORS/شبكة/تسجيل دخول → تجريبي */ }
+      }
+      if (!vehicles) { if (!CFG.useMockOnError && CFG.apiUrl) { document.getElementById('state').textContent='تعذّر جلب البيانات'; return; }
+        vehicles = stepMock(); live = false; }
+      upsert(vehicles); setSource(live); stamp();
+      document.getElementById('state').textContent = 'يعمل';
+    }
+
+    poll();
+    setInterval(poll, CFG.pollIntervalMs);
+
+    // ---------- التحريك السلس ----------
+    const clock = new THREE.Clock();
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.1);
+      for (const e of fleet.values()) {
+        const g = e.group, t = e.target;
+        const dx = t.x - g.position.x, dz = t.z - g.position.z;
+        g.position.x += dx * Math.min(1, dt * 2);
+        g.position.z += dz * Math.min(1, dt * 2);
+        if (Math.abs(dx) + Math.abs(dz) > 0.01) {
+          const targetHeading = Math.atan2(dx, dz);
+          e.heading += (targetHeading - e.heading) * Math.min(1, dt * 4);
+          g.rotation.y = e.heading;
+        }
+        e.group.userData.halo.material.opacity = 0.35 + 0.15 * Math.sin(clock.elapsedTime * 3);
+      }
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+  </script>
+</body>
+</html>
